@@ -1,0 +1,340 @@
+"""
+NIFTY-50 Stocks - 15m ORB Breakout (OpenAlgo)
+- Runs every 15 minutes (at :00/:15/:30/:45)
+- For each symbol it checks:
+    last_15m.high >= prev_15m.high  -> BUY
+    last_15m.low  <= prev_15m.low   -> SELL
+- Uses OpenAlgo REST API client (openalgo.api)
+- APScheduler (IST)
+- Prints quotes immediately
+- In-memory de-duplication: one trade per symbol per direction per day
+"""
+
+import time
+from datetime import datetime, timedelta, time as dtime
+import pytz
+import pandas as pd
+from apscheduler.schedulers.background import BackgroundScheduler
+from openalgo import api
+import os
+
+
+# -------------------------
+# Startup message
+# -------------------------
+print("🔁 OpenAlgo Python Bot is running.")
+
+# -------------------------
+# Configuration - CHANGE THESE
+# -------------------------
+OPENALGO_API_KEY = "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c"  # ← Put your real API key here
+OPENALGO_HOST = "http://127.0.0.1:5000"
+
+# Provide the exact NSE tickers you want scanned.
+# Replace this placeholder list with the official/current NIFTY50 tickers you want.
+# Example below shows a few common tickers; update to all 50 as you prefer.
+NIFTY50_SYMBOLS = [
+    "ADANIENT",
+    "ADANIPORTS",
+    "APOLLOHOSP",
+    "ASIANPAINT",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJFINANCE",
+    "BAJAJFINSV",
+    "BPCL",
+    "BHARTIARTL",
+    "BRITANNIA",
+    "CIPLA",
+    "COALINDIA",
+    "DIVISLAB",
+    "DRREDDY",
+    "EICHERMOT",
+    "GRASIM",
+    "HCLTECH",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HEROMOTOCO",
+    "HINDALCO",
+    "HINDUNILVR",
+    "ICICIBANK",
+    "ITC",
+    "INDUSINDBK",
+    "INFY",
+    "JSWSTEEL",
+    "KOTAKBANK",
+    "LT",
+    "M&M",
+    "MARUTI",
+    "NTPC",
+    "ONGC",
+    "POWERGRID",
+    "RELIANCE",
+    "SBILIFE",
+    "SBIN",
+    "SUNPHARMA",
+    "TCS",
+    "TATACONSUM",
+    "TATAMOTORS",
+    "TATASTEEL",
+    "TECHM",
+    "TITAN",
+    "ULTRACEMCO",
+    "UPL",
+    "WIPRO"
+    # ... add remaining tickers up to 50
+]
+
+EXCHANGE = "NSE"       # Equity on NSE
+PRODUCT = "MIS"        # Intraday (change to CNC if you want delivery)
+PRICE_TYPE = "MARKET"  # MARKET orders
+QTY = 1                # Shares to trade (adjust per symbol/lot)
+CANDLE_INTERVAL = "15m"
+HISTORY_DAYS = 3       # how many days back to request; 3 is usually enough
+MARKET_START = dtime(9, 15)
+MARKET_END = dtime(15, 15)
+
+# -------------------------
+# Initialize OpenAlgo client
+# -------------------------
+client = api(api_key=OPENALGO_API_KEY, host=OPENALGO_HOST)
+
+# -------------------------
+# In-memory state to prevent duplicate trades per symbol/direction per day
+# Format: { "YYYY-MM-DD": { "RELIANCE": {"BUY": True, "SELL": False}, ... } }
+# -------------------------
+trade_registry = {}
+
+# -------------------------
+# Global tracking
+# -------------------------
+MAX_STOCKS_PER_DAY = 3  # Maximum number of stocks to trade per day
+active_positions = {}   # Track active positions {symbol: {action: "BUY/SELL", entry_price: float, qty: int}}
+
+IST = pytz.timezone("Asia/Kolkata")
+
+# -------------------------
+# Helper: market time check (IST)
+# -------------------------
+def is_market_open(now_ist=None):
+    if now_ist is None:
+        now_ist = datetime.now(IST)
+    t = now_ist.time()
+    return (MARKET_START <= t <= MARKET_END)
+
+# -------------------------
+# Helper: get 15m history for a symbol (returns DataFrame)
+# -------------------------
+def get_15m_history(symbol: str) -> pd.DataFrame:
+    end_date = datetime.now(IST)
+    start_date = end_date - timedelta(days=HISTORY_DAYS)
+
+    response = client.history(
+        symbol=symbol,
+        exchange=EXCHANGE,
+        interval=CANDLE_INTERVAL,
+        start_date=start_date.strftime("%Y-%m-%d"),
+        end_date=end_date.strftime("%Y-%m-%d")
+    )
+
+    # Handle dict response from OpenAlgo API
+    if isinstance(response, dict):
+        if response.get('status') == 'success' and 'data' in response:
+            df = pd.DataFrame(response['data'])
+        else:
+            print(f"⚠️ API error: {response.get('message', 'Unknown error')}")
+            return None
+    elif isinstance(response, pd.DataFrame):
+        df = response
+    else:
+        print(f"⚠️ Unexpected response type: {type(response)}")
+        return None
+
+    # Ensure datetime index
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.set_index('timestamp', inplace=True)
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
+    # Ensure we have at least 2 candles
+    return df
+
+# -------------------------
+# Helper: place market order and print responses
+# -------------------------
+def place_market_order(symbol: str, action: str, quantity: int):
+    print(f"\n📌 Placing {action} MARKET order for {symbol} qty={quantity}")
+    try:
+        resp = client.placeorder(
+            strategy="ORB_NIFTY50",
+            symbol=symbol,
+            exchange=EXCHANGE,
+            action=action,
+            product=PRODUCT,
+            price_type=PRICE_TYPE,
+            quantity=quantity
+        )
+        print("📌 Order response:")
+        print(resp)
+        return resp
+    except Exception as e:
+        print("❌ Order placement failed:", e)
+        return None
+
+# -------------------------
+# Helper: close position (exit)
+# -------------------------
+def close_position(symbol: str):
+    """Close an open position"""
+    if symbol not in active_positions:
+        return
+    
+    pos = active_positions[symbol]
+    # Reverse the action: if we bought, we sell. If we sold, we buy back.
+    exit_action = "SELL" if pos["action"] == "BUY" else "BUY"
+    
+    print(f"\n🔴 Closing position for {symbol} (Original: {pos['action']}, Exit: {exit_action})")
+    resp = place_market_order(symbol=symbol, action=exit_action, quantity=pos["qty"])
+    
+    if resp:
+        del active_positions[symbol]
+        print(f"✅ Position closed for {symbol}")
+
+# -------------------------
+# Main ORB scan job
+# -------------------------
+def orb_scan_job():
+    now_ist = datetime.now(IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    print(f"\n[{now_ist.strftime('%Y-%m-%d %H:%M:%S %Z')}] Running ORB scan for {len(NIFTY50_SYMBOLS)} symbols")
+
+    # init today's registry if not present
+    if today_str not in trade_registry:
+        trade_registry.clear()  # clear older days to keep memory small
+        trade_registry[today_str] = {}
+        active_positions.clear()  # Clear positions on new day
+
+    if not is_market_open(now_ist):
+        print("⏸ Market closed (outside trading hours). Skipping scan.")
+        # Close all positions at market close
+        if active_positions:
+            print("\n🔴 Market closing - exiting all positions")
+            for symbol in list(active_positions.keys()):
+                close_position(symbol)
+        return
+    
+    # Count how many stocks we've traded today
+    stocks_traded_today = sum(
+        1 for sym_data in trade_registry[today_str].values()
+        if sym_data.get("BUY") or sym_data.get("SELL")
+    )
+    
+    print(f"📊 Stocks traded today: {stocks_traded_today}/{MAX_STOCKS_PER_DAY}")
+
+    for symbol in NIFTY50_SYMBOLS:
+        # Skip if we've reached max stocks for the day
+        if stocks_traded_today >= MAX_STOCKS_PER_DAY:
+            if symbol not in trade_registry[today_str] or \
+               (not trade_registry[today_str][symbol].get("BUY") and \
+                not trade_registry[today_str][symbol].get("SELL")):
+                continue  # Skip new symbols
+        
+        try:
+            # small protective sleep to avoid hammering the API
+            time.sleep(0.15)
+
+            df = get_15m_history(symbol)
+            if df is None or len(df) < 2:
+                print(f"⚠️ Not enough history for {symbol} (len={len(df) if df is not None else 0})")
+                continue
+
+            # Ensure last two rows are the two most recent closed candles
+            last = df.iloc[-1]      # most recent
+            prev = df.iloc[-2]      # previous
+
+            # Print latest candle summary
+            print(f"\n🔎 {symbol} - last 15m -> open:{last['open']} high:{last['high']} low:{last['low']} close:{last['close']}")
+
+            # Fetch and print live quote (required)
+            try:
+                quote = client.quotes(symbol=symbol, exchange=EXCHANGE)
+                print("📌 Latest Quote:")
+                print(quote)
+                
+                # Extract LTP for exit logic
+                ltp = None
+                if isinstance(quote, dict):
+                    if 'ltp' in quote:
+                        ltp = float(quote['ltp'])
+                    elif 'data' in quote and isinstance(quote['data'], dict) and 'ltp' in quote['data']:
+                        ltp = float(quote['data']['ltp'])
+            except Exception as e:
+                print("⚠ Quote fetch failed:", e)
+                quote = None
+                ltp = None
+
+            # Prepare registry for symbol
+            if symbol not in trade_registry[today_str]:
+                trade_registry[today_str][symbol] = {"BUY": False, "SELL": False}
+
+            # BUY condition: current high >= previous high
+            if float(last["high"]) >= float(prev["high"]):
+                if not trade_registry[today_str][symbol]["BUY"]:
+                    if stocks_traded_today < MAX_STOCKS_PER_DAY:
+                        print(f"📈 {symbol} detected BULLISH 15m breakout (last.high >= prev.high).")
+                        # Place BUY market order
+                        resp = place_market_order(symbol=symbol, action="BUY", quantity=QTY)
+                        if resp:
+                            trade_registry[today_str][symbol]["BUY"] = True
+                            active_positions[symbol] = {
+                                "action": "BUY",
+                                "entry_price": ltp or float(last['close']),
+                                "qty": QTY
+                            }
+                            stocks_traded_today += 1
+                else:
+                    print(f"ℹ️ {symbol} BUY already taken today. Skipping.")
+
+            # SELL condition: current low <= previous low
+            if float(last["low"]) <= float(prev["low"]):
+                if not trade_registry[today_str][symbol]["SELL"]:
+                    if stocks_traded_today < MAX_STOCKS_PER_DAY:
+                        print(f"📉 {symbol} detected BEARISH 15m breakdown (last.low <= prev.low).")
+                        # Place SELL market order
+                        resp = place_market_order(symbol=symbol, action="SELL", quantity=QTY)
+                        if resp:
+                            trade_registry[today_str][symbol]["SELL"] = True
+                            active_positions[symbol] = {
+                                "action": "SELL",
+                                "entry_price": ltp or float(last['close']),
+                                "qty": QTY
+                            }
+                            stocks_traded_today += 1
+                else:
+                    print(f"ℹ️ {symbol} SELL already taken today. Skipping.")
+
+        except Exception as e:
+            print(f"❌ Error processing {symbol}: {e}")
+            continue
+
+    print(f"✅ ORB scan cycle complete. Active positions: {len(active_positions)}")
+
+# -------------------------
+# Scheduler: run at 9:50 AM IST to check ORB breakout
+# -------------------------
+scheduler = BackgroundScheduler(timezone=IST)
+# Run at 9:50 AM, second 10
+scheduler.add_job(orb_scan_job, "cron", hour="9", minute="59", second="10")
+scheduler.start()
+
+print("⏳ ORB strategy scheduler started (running at 9:59 AM IST)")
+
+try:
+    # Keep main thread alive
+    while True:
+        time.sleep(1)
+except (KeyboardInterrupt, SystemExit):
+    print("Shutting down scheduler...")
+    scheduler.shutdown()

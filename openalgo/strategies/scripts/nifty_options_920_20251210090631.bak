@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""
+NIFTY 5-min First Candle ATM Breakout Strategy – FINAL FIXED VERSION
+--------------------------------------------------------------------
+ - First 5-min candle (9:15–9:20) -> HIGH/LOW
+ - Entry monitoring starts at 10:48 AM IST
+ - Breakout above HIGH -> Buy ATM CE
+ - Breakdown below LOW -> Buy ATM PE
+ - SL = 30% | Target = 50%
+ - One trade per day (strict)
+ - No re-entry after SL/Target/Opposite breakout
+ - No new leg until first is fully closed
+ - Forced exit at 15:10 IST
+ - Uses optionsorder() endpoint (your environment)
+ - Prints all quotes instantly
+"""
+
+import os
+import time
+import pytz
+import threading
+from datetime import datetime, timedelta, time as dt_time
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import traceback
+
+from openalgo import api
+
+# -------------------------------------------------------
+# Startup Banner
+# -------------------------------------------------------
+print("🔁 OpenAlgo Python Bot is running.")
+
+# -------------------------------------------------------
+# Client Setup
+# -------------------------------------------------------
+API_KEY = os.getenv("OPENALGO_APIKEY", "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c")
+API_HOST = os.getenv("OPENALGO_API_HOST", "http://127.0.0.1:5000")
+
+client = api(api_key=API_KEY, host=API_HOST)
+
+# -------------------------------------------------------
+# Strategy Settings
+# -------------------------------------------------------
+LOT_SIZE = 75
+QTY = LOT_SIZE * 1
+
+SPOT = "NIFTY"
+SPOT_EX = "NSE_INDEX"
+OPT_EX = "NFO"
+
+SL_PCT = 0.30
+TARGET_PCT = 0.50
+
+ENTRY_HOUR = 9
+ENTRY_MIN = 21
+EXIT_TIME = "15:10"
+
+IST = pytz.timezone("Asia/Kolkata")
+scheduler = BackgroundScheduler(timezone=IST)
+stop_flag = threading.Event()
+
+# -------------------------------------------------------
+# State (One trade per day)
+# -------------------------------------------------------
+state = {
+    "first_high": None,
+    "first_low": None,
+    "atm": None,
+    "expiry": None,
+    "entry_side": None,
+    "entry_symbol": None,
+    "entry_price": None,
+    "stop_price": None,
+    "target_price": None,
+    "qty": 0,
+    "active": False,
+    "trade_done": False,      # 🚫 Prevents re-entry
+}
+
+# -------------------------------------------------------
+# Utility
+# -------------------------------------------------------
+def now():
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+def print_quote(q):
+    print("QUOTE:", q)
+    if "data" in q:
+        print("   >> LTP:", q["data"].get("ltp"))
+
+def round_strike(v, step=50):
+    return int(round(v / step) * step)
+
+# -------------------------------------------------------
+# Spot + Candle
+# -------------------------------------------------------
+def get_spot():
+    try:
+        q = client.quotes(symbol=SPOT, exchange=SPOT_EX)
+        print_quote(q)
+        return q.get("data", {}).get("ltp")
+    except:
+        return None
+
+def get_first_candle():
+    today = datetime.now(IST).date()
+    d = today.strftime("%Y-%m-%d")
+
+    try:
+        df = client.history(
+            symbol=SPOT,
+            exchange=SPOT_EX,
+            interval="5m",
+            start_date=d,
+            end_date=d
+        )
+        print("History:", df)
+
+        df.index = df.index.tz_localize(IST) if df.index.tz is None else df.index.tz_convert(IST)
+
+        for ts, r in df.iterrows():
+            if ts.time() == dt_time(9, 15):
+                return float(r.high), float(r.low)
+
+        r = df.iloc[0]
+        return float(r.high), float(r.low)
+    except:
+        traceback.print_exc()
+        return None, None
+
+# -------------------------------------------------------
+# Expiry + Option Symbol
+# -------------------------------------------------------
+def get_expiry():
+    try:
+        r = client.expiry(symbol=SPOT, exchange=OPT_EX, instrumenttype="options")
+        if r.get("status") == "success":
+            exp = r["data"][0]  # DD-MMM-YY
+            dt = datetime.strptime(exp, "%d-%b-%y")
+            months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+            return f"{dt.day:02d}{months[dt.month-1]}{str(dt.year)[-2:]}"
+    except:
+        traceback.print_exc()
+    return None
+
+def get_ltp(symbol):
+    try:
+        q = client.quotes(symbol=symbol, exchange=OPT_EX)
+        print_quote(q)
+        return q.get("data", {}).get("ltp")
+    except:
+        return None
+
+# -------------------------------------------------------
+# Place Orders (optionsorder)
+# -------------------------------------------------------
+def send_order(action, side, strike, qty):
+    """
+    Uses your working order resolver.
+    Returns (response, resolved_symbol)
+    """
+    try:
+        resp = client.optionsorder(
+            strategy="BREAKOUT",
+            underlying=SPOT,
+            exchange=SPOT_EX,
+            expiry_date=state["expiry"],
+            offset="ATM",
+            option_type=side,
+            action=action,
+            quantity=qty,
+            pricetype="MARKET",
+            product="NRML"
+        )
+        print("ORDER:", resp)
+
+        symbol = resp.get("symbol")
+        return resp, symbol
+    except:
+        traceback.print_exc()
+        return None, None
+
+# -------------------------------------------------------
+# Reset (Permanently disables re-entry)
+# -------------------------------------------------------
+def reset_day():
+    print(now(), "🧹 Resetting...")
+    stop_flag.set()
+
+    state["entry_side"] = None
+    state["entry_symbol"] = None
+    state["entry_price"] = None
+    state["stop_price"] = None
+    state["target_price"] = None
+    state["qty"] = 0
+    state["active"] = False
+    state["trade_done"] = True     # 🔐 LOCKED. No further trades today.
+
+# -------------------------------------------------------
+# Prepare Strategy
+# -------------------------------------------------------
+def prepare():
+    print(now(), "🔍 Preparing...")
+
+    if state["trade_done"]:
+        print("Trade already done today. Skipping.")
+        return
+
+    high, low = get_first_candle()
+    if not high:
+        print("❌ No candle")
+        return
+
+    state["first_high"] = high
+    state["first_low"] = low
+
+    spot = get_spot()
+    if not spot:
+        return
+
+    strike = round_strike(spot)
+    state["atm"] = strike
+
+    exp = get_expiry()
+    if not exp:
+        print("❌ No expiry")
+        return
+    state["expiry"] = exp
+
+    state["active"] = True
+
+    print(now(), f"HIGH={high} LOW={low} ATM={strike} EXP={exp}")
+    start_monitor()
+
+# -------------------------------------------------------
+# Monitor Logic
+# -------------------------------------------------------
+def start_monitor():
+    stop_flag.clear()
+    threading.Thread(target=monitor, daemon=True).start()
+
+def monitor():
+    poll = 1.2
+
+    while not stop_flag.is_set():
+        spot = get_spot()
+        if not spot:
+            time.sleep(poll)
+            continue
+
+        # -------------------------------------------------------
+        # ENTRY
+        # -------------------------------------------------------
+        if state["active"] and state["entry_side"] is None and state["trade_done"] == False:
+
+            # CE breakout
+            if spot > state["first_high"]:
+                print(now(), "BREAKOUT → BUY CE")
+                resp, sym = send_order("BUY", "CE", state["atm"], QTY)
+                ltp = get_ltp(sym)
+
+                state.update({
+                    "entry_side": "CE",
+                    "entry_symbol": sym,
+                    "entry_price": ltp,
+                    "stop_price": ltp * (1 - SL_PCT),
+                    "target_price": ltp * (1 + TARGET_PCT),
+                    "qty": QTY
+                })
+                print(now(), f"CE ENTRY {ltp}")
+                continue
+
+            # PE breakdown
+            if spot < state["first_low"]:
+                print(now(), "BREAKDOWN → BUY PE")
+                resp, sym = send_order("BUY", "PE", state["atm"], QTY)
+                ltp = get_ltp(sym)
+
+                state.update({
+                    "entry_side": "PE",
+                    "entry_symbol": sym,
+                    "entry_price": ltp,
+                    "stop_price": ltp * (1 - SL_PCT),
+                    "target_price": ltp * (1 + TARGET_PCT),
+                    "qty": QTY
+                })
+                print(now(), f"PE ENTRY {ltp}")
+                continue
+
+        # -------------------------------------------------------
+        # EXIT
+        # -------------------------------------------------------
+        if state["entry_side"]:
+            ltp = get_ltp(state["entry_symbol"])
+            if not ltp:
+                time.sleep(poll)
+                continue
+
+            if ltp <= state["stop_price"]:
+                print(now(), "🔻 SL HIT")
+                send_order("SELL", state["entry_side"], state["atm"], state["qty"])
+                reset_day()
+                break
+
+            if ltp >= state["target_price"]:
+                print(now(), "🎉 TARGET HIT")
+                send_order("SELL", state["entry_side"], state["atm"], state["qty"])
+                reset_day()
+                break
+
+        time.sleep(poll)
+
+# -------------------------------------------------------
+# Exit Time Close
+# -------------------------------------------------------
+def exit_job():
+    print(now(), "⏳ Exit 15:10")
+    if state["entry_side"]:
+        send_order("SELL", state["entry_side"], state["atm"], state["qty"])
+    reset_day()
+
+# -------------------------------------------------------
+# Scheduler
+# -------------------------------------------------------
+def schedule():
+    scheduler.add_job(
+        prepare,
+        CronTrigger(hour=ENTRY_HOUR, minute=ENTRY_MIN, timezone=IST),
+        id="prepare"
+    )
+    hh, mm = EXIT_TIME.split(":")
+    scheduler.add_job(
+        exit_job,
+        CronTrigger(hour=int(hh), minute=int(mm), timezone=IST),
+        id="exit"
+    )
+    print(now(), f"⏱ Scheduled: {ENTRY_HOUR}:{ENTRY_MIN} prepare | {EXIT_TIME} exit")
+
+# -------------------------------------------------------
+# Main
+# -------------------------------------------------------
+if __name__ == "__main__":
+    schedule()
+    scheduler.start()
+    print(now(), "🚀 Waiting for entry time...")
+
+    while True:
+        time.sleep(1)

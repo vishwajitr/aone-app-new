@@ -1,0 +1,17 @@
+{
+  "rolling_straddle_20251206221434": {
+    "LOTS": "1",
+    "OPENALGO_APIKEY": "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c",
+    "SYMBOL": "NIFTY",
+    "MAX_ADJUSTMENTS": "3"
+  },
+  "rolling_straddle_backtrader_20251206223550": {
+    "OPENALGO_API_KEY": "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c"
+  },
+  "rolling_straddle_20251207211232": {
+    "OPENALGO_APIKEY": "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c"
+  },
+  "rolling_straddle_20251208101239": {
+    "OPENALGO_APIKEY": "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c"
+  }
+}

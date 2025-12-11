@@ -1,0 +1,49 @@
+{
+  "rolling_straddle_20251208101239": {
+    "name": "Rolling Short Straddle Strategy Live",
+    "file_path": "strategies/scripts/rolling_straddle_20251208101239.py",
+    "is_running": false,
+    "is_scheduled": false,
+    "created_at": "2025-12-08T10:12:39.150718+05:30",
+    "user_id": "vishwajitrikame",
+    "last_started": "2025-12-09T11:20:35.400172+05:30",
+    "pid": null,
+    "last_stopped": "2025-12-09T11:22:00.344368+05:30",
+    "last_modified": "2025-12-08T10:15:43.821664+05:30"
+  },
+  "orb_nifty50_20251209093701": {
+    "name": "ORB_NIFTY50",
+    "file_path": "strategies/scripts/orb_nifty50_20251209093701.py",
+    "is_running": false,
+    "is_scheduled": false,
+    "created_at": "2025-12-09T09:37:01.328119+05:30",
+    "user_id": "vishwajitrikame",
+    "last_started": "2025-12-09T09:58:17.640115+05:30",
+    "pid": null,
+    "last_stopped": "2025-12-09T11:20:08.465955+05:30",
+    "last_modified": "2025-12-09T09:58:15.539010+05:30"
+  },
+  "nifty_options_920_20251210090631": {
+    "name": "nifty_options_920",
+    "file_path": "strategies/scripts/nifty_options_920_20251210090631.py",
+    "is_running": true,
+    "is_scheduled": false,
+    "created_at": "2025-12-10T09:06:31.850150+05:30",
+    "user_id": "vishwajitrikame",
+    "last_started": "2025-12-11T09:51:43.599993+05:30",
+    "pid": 32685,
+    "last_stopped": "2025-12-11T09:50:53.501109+05:30",
+    "last_modified": "2025-12-11T09:51:34.340877+05:30"
+  },
+  "orb_openalgo_20251210091837": {
+    "name": "orb_openalgo",
+    "file_path": "strategies/scripts/orb_openalgo_20251210091837.py",
+    "is_running": false,
+    "is_scheduled": false,
+    "created_at": "2025-12-10T09:18:37.583010+05:30",
+    "user_id": "vishwajitrikame",
+    "last_started": "2025-12-10T09:18:43.304407+05:30",
+    "pid": null,
+    "last_stopped": "2025-12-10T10:32:59.147173+05:30"
+  }
+}
