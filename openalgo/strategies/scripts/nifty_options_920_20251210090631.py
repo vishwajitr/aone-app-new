@@ -55,7 +55,7 @@ TARGET_PCT = 0.50
 
 # ENTRY time - set as you like
 ENTRY_HOUR = 9
-ENTRY_MIN = 53
+ENTRY_MIN = 21
 
 EXIT_TIME = "15:10"
 
@@ -335,6 +335,8 @@ def start_monitor():
 
 def monitor():
     poll = 1.2
+    last_known_ltp = None  # Track last known price
+    quote_fail_count = 0
 
     while not stop_flag.is_set():
         try:
@@ -403,6 +405,18 @@ def monitor():
                     if state["entry_price"]:
                         state["stop_price"] = state["entry_price"] * (1 - SL_PCT)
                         state["target_price"] = state["entry_price"] * (1 + TARGET_PCT)
+                    else:
+                        # ⚠️ CRITICAL: If entry_price couldn't be determined, 
+                        # try to get it from quote immediately
+                        print(now(), "⚠️ Entry price not found in order response, fetching quote...")
+                        if resolved_sym:
+                            entry_price = get_ltp_by_symbol(resolved_sym)
+                            if entry_price:
+                                state["entry_price"] = float(entry_price)
+                                state["stop_price"] = state["entry_price"] * (1 - SL_PCT)
+                                state["target_price"] = state["entry_price"] * (1 + TARGET_PCT)
+                            else:
+                                print(now(), "❌ CRITICAL: Cannot determine entry price - stop loss will not work!")
                     state["entry_side"] = "PE"
                     print(now(), f"PE entry recorded: symbol={resolved_sym} price={state['entry_price']} stop={state['stop_price']} target={state['target_price']}")
                     continue
@@ -410,20 +424,36 @@ def monitor():
             # EXIT: use the resolved symbol stored on entry so we close exact contract
             if state["entry_side"] and state["entry_symbol"]:
                 current_ltp = get_ltp_by_symbol(state["entry_symbol"])
+                
                 if current_ltp is None:
-                    time.sleep(poll)
-                    continue
+                    quote_fail_count += 1
+                    print(now(), f"⚠️ Quote fetch failed (count: {quote_fail_count}), using last known LTP: {last_known_ltp}")
+                    
+                    # Use last known price if available, but warn
+                    if last_known_ltp is None:
+                        time.sleep(poll)
+                        continue
+                    current_ltp = last_known_ltp
+                else:
+                    quote_fail_count = 0
+                    last_known_ltp = current_ltp
+
+                # Ensure stop_price is set
+                if not state.get("stop_price") and state.get("entry_price"):
+                    state["stop_price"] = state["entry_price"] * (1 - SL_PCT)
+                    state["target_price"] = state["entry_price"] * (1 + TARGET_PCT)
+                    print(now(), f"⚠️ Recalculated stop_price: {state['stop_price']} (entry: {state['entry_price']})")
 
                 # Stoploss
                 if state.get("stop_price") and current_ltp <= state["stop_price"]:
-                    print(now(), "🔻 STOPLOSS HIT -> closing exact contract", state["entry_symbol"])
+                    print(now(), f"🔻 STOPLOSS HIT -> LTP: {current_ltp} <= Stop: {state['stop_price']} -> closing exact contract", state["entry_symbol"])
                     close_option_by_symbol("SELL", state["entry_symbol"], state["qty"])
                     reset_day()
                     break
 
                 # Target
                 if state.get("target_price") and current_ltp >= state["target_price"]:
-                    print(now(), "🎯 TARGET HIT -> closing exact contract", state["entry_symbol"])
+                    print(now(), f"🎯 TARGET HIT -> LTP: {current_ltp} >= Target: {state['target_price']} -> closing exact contract", state["entry_symbol"])
                     close_option_by_symbol("SELL", state["entry_symbol"], state["qty"])
                     reset_day()
                     break
