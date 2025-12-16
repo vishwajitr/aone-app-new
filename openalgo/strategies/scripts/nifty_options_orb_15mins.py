@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-NIFTY 9:45–10:00 ORB (LIVE - PRODUCTION READY)
+NIFTY 9:15–9:30 ORB (LIVE - PRODUCTION READY)
 -----------------------------------------------
 ✔ Live ORB candle build (no history)
-✔ 9:45–10:00 breakout with buffer
+✔ 9:15–9:30 breakout with buffer
 ✔ NO manual expiry (OpenAlgo auto-resolves)
 ✔ Correct options order placement
 ✔ Continuous spot + option logging
@@ -51,8 +51,8 @@ TARGET_POINTS = 30
 STOPLOSS_POINTS = 15
 BUFFER = 0.2
 
-ORB_START = dt_time(9, 15)   # ORB build starts at 9:45 AM
-ORB_END   = dt_time(9, 30)   # ORB locks at 10:00 AM
+ORB_START = dt_time(9, 15)   # ORB build starts at 9:15 AM
+ORB_END   = dt_time(9, 30)   # ORB locks at 9:30 AM
 
 FORCE_EXIT = dt_time(15, 10)
 
@@ -205,7 +205,7 @@ def buy_option(option_type):
         log(f"🔵 Attempting to BUY {option_type} option...")
         
         resp = client.optionsorder(
-            strategy="ORB_0945_1000",
+            strategy="ORB_0915_0930",
             underlying="NIFTY",
             exchange=OPTION_ORDER_EXCHANGE,
             offset="ATM",
@@ -240,7 +240,7 @@ def sell_option(symbol):
         log(f"🔴 Attempting to SELL {symbol}...")
         
         resp = client.placeorder(
-            strategy="ORB_0945_1000_EXIT",
+            strategy="ORB_0915_0930_EXIT",
             symbol=symbol,
             exchange=OPTION_QUOTES_EXCHANGE,
             action="SELL",
@@ -265,7 +265,7 @@ def sell_option(symbol):
 # -------------------------------------------------------
 # Main Loop
 # -------------------------------------------------------
-log("⏳ Waiting for market to open (9:45 AM)...")
+log("⏳ Waiting for market to open (9:15 AM)...")
 
 try:
     while True:
@@ -290,7 +290,7 @@ try:
             time.sleep(1)
             continue
 
-        # Build ORB candle (9:45 - 10:00)
+        # Build ORB candle (9:15 - 9:30)
         if ORB_START <= now <= ORB_END:
             if first_high is None:
                 first_high = spot
@@ -303,7 +303,7 @@ try:
                 if int(time.time()) % 30 == 0:
                     log(f"📊 ORB Building | H={first_high:.2f} L={first_low:.2f} Current={spot:.2f}")
 
-        # Lock ORB at 10:00 AM
+        # Lock ORB at 9:30 AM
         if now > ORB_END and not orb_locked and first_high:
             orb_locked = True
             range_points = first_high - first_low
