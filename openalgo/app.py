@@ -400,7 +400,11 @@ def setup_environment(app):
     # Conditionally setup ngrok in development environment
     if os.getenv('NGROK_ALLOW') == 'TRUE':
         global _ngrok_tunnel
-        from pyngrok import ngrok
+        try:
+            from pyngrok import ngrok
+        except ImportError:
+            logger.warning("pyngrok not installed. ngrok tunnel will not be available.")
+            return
 
         # Register cleanup handlers for graceful shutdown
         atexit.register(cleanup_ngrok)
@@ -410,6 +414,8 @@ def setup_environment(app):
         signal.signal(signal.SIGTERM, signal_handler)
 
         import time
+        import ssl
+        from urllib.error import URLError
 
         # Kill any existing ngrok process first (more robust cleanup)
         try:
@@ -419,7 +425,7 @@ def setup_environment(app):
         except Exception:
             pass  # No existing process to kill
 
-        # Try to connect, handling "tunnel already exists" error
+        # Try to connect, handling "tunnel already exists" error and SSL certificate errors
         max_retries = 3
         public_url = None
 
@@ -441,6 +447,25 @@ def setup_environment(app):
                 logger.debug(f"Created new ngrok tunnel: {public_url}")
                 break
 
+            except (URLError, ssl.SSLError) as e:
+                # Handle SSL certificate verification errors
+                error_msg = str(e)
+                if 'CERTIFICATE_VERIFY_FAILED' in error_msg or 'certificate verify failed' in error_msg.lower():
+                    logger.error(
+                        "ngrok SSL certificate verification failed. This is often caused by missing or outdated "
+                        "SSL certificates on macOS. To fix this:\n"
+                        "  1. Run: /Applications/Python\\ 3.11/Install\\ Certificates.command (or similar for your Python version)\n"
+                        "  2. Or manually install ngrok: https://ngrok.com/download\n"
+                        "  3. Or set NGROK_ALLOW=FALSE to disable ngrok\n"
+                        f"Error details: {e}"
+                    )
+                    # Don't retry on SSL errors - they won't resolve with retries
+                    break
+                else:
+                    logger.error(f"ngrok network error: {e}")
+                    if attempt == max_retries - 1:
+                        break
+                    time.sleep(1)
             except Exception as e:
                 error_msg = str(e)
                 if 'already exists' in error_msg:
@@ -451,17 +476,27 @@ def setup_environment(app):
                         time.sleep(2)  # Longer wait after conflict
                     except Exception:
                         pass
+                elif 'PyngrokNgrokInstallError' in str(type(e).__name__) or 'install' in error_msg.lower():
+                    # Handle ngrok installation/download errors
+                    logger.error(
+                        f"ngrok installation/download failed: {e}\n"
+                        "This may be due to network issues or SSL certificate problems.\n"
+                        "You can manually install ngrok from https://ngrok.com/download or set NGROK_ALLOW=FALSE to disable."
+                    )
+                    # Don't retry on installation errors
+                    break
                 else:
                     logger.error(f"ngrok error: {e}")
                     if attempt == max_retries - 1:
-                        raise
+                        logger.warning("Failed to establish ngrok tunnel after all retries. App will continue without ngrok.")
+                        break
                     time.sleep(1)
 
         if public_url:
             _ngrok_tunnel = public_url  # Store for cleanup
             logger.info(f"ngrok URL: {public_url}")
         else:
-            logger.error("Failed to establish ngrok tunnel after all retries")
+            logger.warning("ngrok tunnel not available. App will continue without ngrok tunnel.")
 
 app = create_app()
 

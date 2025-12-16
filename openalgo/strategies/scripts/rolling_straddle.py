@@ -1,362 +1,226 @@
-#!/usr/bin/env python3
-"""
-rolling_short_straddle_prod_fullroll.py
-
-Production-ready Rolling Short Straddle with FULL ROLL strategy:
-- On adjustment: close BOTH CE and PE legs, then sell fresh straddle at new ATM
-- Uses OpenAlgo SDK for live orders
-- Cleaner position tracking (no complex cycle management)
-"""
-
+import time as systime
+from datetime import datetime, time as dtime
+from apscheduler.schedulers.background import BackgroundScheduler
 from openalgo import api
-import time
-from datetime import datetime, time as dt_time
-import os
-import sys
-import traceback
+import pytz
 
-print("🔁 OpenAlgo Rolling Straddle (Full Roll) is running.")
+print("🔁 OpenAlgo Python Bot with Hedges is running.")
 
-class RollingShortStraddleFullRoll:
-    def __init__(
-        self,
-        api_key=None,
-        symbol="NIFTY",
-        lots=1,
-        host="http://127.0.0.1:5000",
-        entry_time_str="09:20",
-        exit_time_str="15:15",
-        max_adjustments=3,
-        adjustment_trigger=0.005,   # 0.5%
-    ):
-        # API setup
-        self.api_key = api_key or os.getenv('OPENALGO_APIKEY')
-        if not self.api_key:
-            print("Error: API key not provided. Set OPENALGO_APIKEY environment variable.")
-            sys.exit(1)
+# === USER PARAMETERS ===
 
-        self.client = api(api_key=self.api_key, host=host)
+STRADDLE_ENTRY_HOUR = 9       # 9 for 9:20 AM
+STRADDLE_ENTRY_MINUTE = 20    # 20 for 9:20 AM
 
-        # Config
-        self.symbol = symbol.upper()
-        self.lots = int(lots)
-        self.lot_size_map = {"NIFTY": 75, "BANKNIFTY": 25}
-        self.lot_size = self.lot_size_map.get(self.symbol, 75)
-        self.total_qty_per_leg = self.lot_size * self.lots
+SQUAREOFF_HOUR = 15           # 15 for 3:20 PM
+SQUAREOFF_MINUTE = 20         # 20 for 3:20 PM
 
-        self.entry_time_str = entry_time_str
-        self.exit_time_str = exit_time_str
+MAX_STRADDLES_PER_DAY = 3     # Daily limit on rolling straddles
+ROLLING_THRESHOLD_PCT = 0.4   # Threshold for rolling (in percent, e.g. 0.4 means 0.4%)
 
-        # Strategy state - simplified for full roll
-        self.current_strike = None
-        self.ce_open = False
-        self.pe_open = False
-        self.ce_order_id = None
-        self.pe_order_id = None
-        self.ce_sell_price = None
-        self.pe_sell_price = None
+HEDGE_DISTANCE = 500          # Hedge distance from ATM (500 points)
+
+
+SYMBOL = "NIFTY"
+EXPIRY = "19JUN25"
+EXCHANGE = "NSE_INDEX"
+OPTION_EXCHANGE = "NFO"
+STRIKE_INTERVAL = 50
+
+API_KEY = "YOU-OPENALGO-APIKEY"
+API_HOST = "http://127.0.0.1:5000"
+
+client = api(api_key=API_KEY, host=API_HOST)
+
+def get_atm_strike(spot):
+    return int(round(spot / STRIKE_INTERVAL) * STRIKE_INTERVAL)
+
+def get_spot():
+    quote = client.quotes(symbol=SYMBOL, exchange=EXCHANGE)
+    print("Quote:", quote)
+    data = quote['data']
+    if isinstance(data, list):
+        data = data[0]
+    return data['ltp']
+
+def get_option_symbol(base, expiry, strike, opttype):
+    return f"{base}{expiry}{strike}{opttype}"
+
+# --- State ---
+last_reference_spot = None
+current_straddle_symbols = []  # Only straddle CE and PE
+current_hedge_symbols = []     # Only hedge CE and PE
+straddle_entry_count = 0
+
+def reset_daily_counter():
+    global straddle_entry_count
+    straddle_entry_count = 0
+    print(f"Daily straddle entry counter reset to zero at {datetime.now()}")
+
+def place_straddle_with_hedges():
+    global last_reference_spot, current_straddle_symbols, current_hedge_symbols, straddle_entry_count
+    
+    if straddle_entry_count >= MAX_STRADDLES_PER_DAY:
+        print(f"Straddle entry limit ({MAX_STRADDLES_PER_DAY}) reached for today.")
+        return
+    
+    spot = get_spot()
+    atm_strike = get_atm_strike(spot)
+    
+    # Straddle symbols (SELL at ATM)
+    straddle_ce = get_option_symbol(SYMBOL, EXPIRY, atm_strike, "CE")
+    straddle_pe = get_option_symbol(SYMBOL, EXPIRY, atm_strike, "PE")
+    
+    # Hedge symbols (BUY 500 points away)
+    hedge_ce_strike = atm_strike + HEDGE_DISTANCE
+    hedge_pe_strike = atm_strike - HEDGE_DISTANCE
+    hedge_ce = get_option_symbol(SYMBOL, EXPIRY, hedge_ce_strike, "CE")
+    hedge_pe = get_option_symbol(SYMBOL, EXPIRY, hedge_pe_strike, "PE")
+    
+    print(f"\n{'='*60}")
+    print(f"PLACING STRADDLE + HEDGES")
+    print(f"Spot: {spot} | ATM: {atm_strike}")
+    print(f"Straddle: SELL {straddle_ce} + {straddle_pe}")
+    print(f"Hedges: BUY {hedge_ce} + {hedge_pe}")
+    print(f"{'='*60}\n")
+    
+    # Place SELL orders for straddle
+    for sym in [straddle_ce, straddle_pe]:
+        order = client.placeorder(
+            strategy=STRATEGY, symbol=sym, action="SELL",
+            exchange=OPTION_EXCHANGE, price_type="MARKET",
+            product="MIS", quantity=LOT_SIZE
+        )
+        print(f"SELL Order placed for {sym}: {order}")
+    
+    # Place BUY orders for hedges
+    for sym in [hedge_ce, hedge_pe]:
+        order = client.placeorder(
+            strategy=STRATEGY, symbol=sym, action="BUY",
+            exchange=OPTION_EXCHANGE, price_type="MARKET",
+            product="MIS", quantity=LOT_SIZE
+        )
+        print(f"BUY Order placed (HEDGE) for {sym}: {order}")
+    
+    # Update state - keep straddle and hedge symbols separate
+    last_reference_spot = spot
+    current_straddle_symbols = [straddle_ce, straddle_pe]
+    current_hedge_symbols = [hedge_ce, hedge_pe]
+    straddle_entry_count += 1
+    print(f"Straddle Entry Count updated: {straddle_entry_count}")
+
+def place_new_straddle():
+    """Place only new straddle at current ATM, keep existing hedges"""
+    global last_reference_spot, current_straddle_symbols, straddle_entry_count
+    
+    if straddle_entry_count >= MAX_STRADDLES_PER_DAY:
+        print(f"Straddle entry limit ({MAX_STRADDLES_PER_DAY}) reached for today.")
+        return
+    
+    spot = get_spot()
+    atm_strike = get_atm_strike(spot)
+    
+    # New straddle symbols (SELL at new ATM)
+    straddle_ce = get_option_symbol(SYMBOL, EXPIRY, atm_strike, "CE")
+    straddle_pe = get_option_symbol(SYMBOL, EXPIRY, atm_strike, "PE")
+    
+    print(f"\n{'='*60}")
+    print(f"PLACING NEW STRADDLE (Hedges remain unchanged)")
+    print(f"Spot: {spot} | ATM: {atm_strike}")
+    print(f"Straddle: SELL {straddle_ce} + {straddle_pe}")
+    print(f"{'='*60}\n")
+    
+    # Place SELL orders for new straddle
+    for sym in [straddle_ce, straddle_pe]:
+        order = client.placeorder(
+            strategy=STRATEGY, symbol=sym, action="SELL",
+            exchange=OPTION_EXCHANGE, price_type="MARKET",
+            product="MIS", quantity=LOT_SIZE
+        )
+        print(f"SELL Order placed for {sym}: {order}")
+    
+    # Update state
+    last_reference_spot = spot
+    current_straddle_symbols = [straddle_ce, straddle_pe]
+    straddle_entry_count += 1
+    print(f"Straddle Entry Count updated: {straddle_entry_count}")
+
+def close_straddle_only():
+    """Close ONLY the straddle legs, NOT the hedges"""
+    print(f"\n{'='*60}")
+    print("CLOSING STRADDLE ONLY (Hedges remain open)")
+    print(f"{'='*60}\n")
+    
+    for sym in current_straddle_symbols:
+        order = client.placeorder(
+            strategy=STRATEGY, symbol=sym, action="BUY",
+            exchange=OPTION_EXCHANGE, price_type="MARKET",
+            product="MIS", quantity=LOT_SIZE
+        )
+        print(f"BUY Order (EXIT) for straddle {sym}: {order}")
+
+def close_all_positions():
+    """Close both straddle and hedges"""
+    print(f"\n{'='*60}")
+    print("CLOSING ALL POSITIONS (Straddle + Hedges)")
+    print(f"{'='*60}\n")
+    
+    # Close straddle (BUY back the SELL positions)
+    for sym in current_straddle_symbols:
+        order = client.placeorder(
+            strategy=STRATEGY, symbol=sym, action="BUY",
+            exchange=OPTION_EXCHANGE, price_type="MARKET",
+            product="MIS", quantity=LOT_SIZE
+        )
+        print(f"BUY Order (EXIT) for straddle {sym}: {order}")
+    
+    # Close hedges (SELL the BUY positions)
+    for sym in current_hedge_symbols:
+        order = client.placeorder(
+            strategy=STRATEGY, symbol=sym, action="SELL",
+            exchange=OPTION_EXCHANGE, price_type="MARKET",
+            product="MIS", quantity=LOT_SIZE
+        )
+        print(f"SELL Order (EXIT) for hedge {sym}: {order}")
+
+def rolling_monitor():
+    global last_reference_spot
+    spot = get_spot()
+    print(f"Spot: {spot}")
+    print(f"Last Reference Spot: {last_reference_spot}")
+    
+    threshold = last_reference_spot * (ROLLING_THRESHOLD_PCT / 100.0)
+    
+    if abs(spot - last_reference_spot) >= threshold:
+        print(f"\n⚠️  ROLLING TRIGGERED: Spot moved to {spot} from ref {last_reference_spot} (Threshold: {threshold})")
         
-        self.entry_spot = None
-        self.adjustment_count = 0
-        self.max_adjustments = int(max_adjustments)
-        self.adjustment_trigger = float(adjustment_trigger)
+        # Close only straddle, keep hedges
+        close_straddle_only()
+        
+        # Place new straddle only (hedges remain unchanged)
+        place_new_straddle()
 
-        # Print init
-        print("\n" + "="*60)
-        print("ROLLING SHORT STRADDLE - FULL ROLL STRATEGY")
-        print("="*60)
-        print(f"Symbol: {self.symbol}")
-        print(f"Lots: {self.lots} (Quantity per leg: {self.total_qty_per_leg})")
-        print(f"Adjustment trigger: {self.adjustment_trigger*100:.2f}%")
-        print(f"Max adjustments: {self.max_adjustments}")
-        print(f"Strategy: Close BOTH legs on adjustment, open fresh straddle")
-        print("="*60 + "\n")
+def eod_exit():
+    print("\n🕒 EOD exit triggered.")
+    close_all_positions()
 
-    def get_spot_price(self):
-        """Fetch spot price"""
-        try:
-            exch = "NSE_INDEX" if self.symbol in {"NIFTY", "BANKNIFTY", "NIFTYNXT50", "FINNIFTY", "MIDCPNIFTY"} else "NSE"
-            response = self.client.quotes(symbol=self.symbol, exchange=exch)
-            print("Quote:", response)
-            if response is None:
-                return None
-            if isinstance(response, dict):
-                if 'ltp' in response and response['ltp'] is not None:
-                    return float(response['ltp'])
-                if 'data' in response and isinstance(response['data'], dict) and 'ltp' in response['data']:
-                    return float(response['data']['ltp'])
-                for v in response.values():
-                    if isinstance(v, dict) and 'ltp' in v and v['ltp'] is not None:
-                        return float(v['ltp'])
-            return None
-        except Exception as e:
-            print("Error fetching spot price:", e)
-            return None
+# === Scheduler ===
+scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+scheduler.add_job(reset_daily_counter, 'cron', day_of_week='mon-fri', hour=STRADDLE_ENTRY_HOUR, minute=STRADDLE_ENTRY_MINUTE)
+scheduler.add_job(place_straddle_with_hedges, 'cron', day_of_week='mon-fri', hour=STRADDLE_ENTRY_HOUR, minute=STRADDLE_ENTRY_MINUTE)
+scheduler.add_job(eod_exit, 'cron', day_of_week='mon-fri', hour=SQUAREOFF_HOUR, minute=SQUAREOFF_MINUTE)
+scheduler.start()
 
-    def get_atm_strike(self, spot_price):
-        step = 100 if self.symbol == "BANKNIFTY" else 50
-        return int(round(spot_price / step) * step)
-
-    def safe_place_order(self, strike, option_type, action, quantity=None, price_type="MARKET"):
-        """Place order and return {'order_id', 'filled_price'}"""
-        qty = quantity if quantity is not None else self.total_qty_per_leg
-        try:
-            resp = self.client.placeorder(
-                strategy="RollingStraddleFullRoll",
-                symbol=self.symbol,
-                action=action,
-                exchange="NFO",
-                price_type=price_type,
-                product="MIS",
-                quantity=str(qty),
-                position_size=str(qty),
-                strike=str(strike),
-                option_type=option_type
-            )
-        except Exception as e:
-            print(f"Error placing order: {e}")
-            return {"order_id": None, "filled_price": None}
-
-        if not resp:
-            print(f"placeorder returned falsy response: {resp}")
-            return {"order_id": None, "filled_price": None}
-
-        order_id = resp.get('orderid') or resp.get('order_id') or resp.get('id')
-        if not order_id:
-            print(f"placeorder response missing order id: {resp}")
-            return {"order_id": None, "filled_price": None}
-
-        print(f"✓ Order placed: {action} {strike}{option_type} qty={qty} orderid={order_id}")
-        filled_price = self.fetch_order_filled_price(order_id)
-        return {"order_id": order_id, "filled_price": filled_price}
-
-    def fetch_order_filled_price(self, order_id, retries=3, delay=1.0):
-        """Best-effort: fetch filled price from order status"""
-        try:
-            for _ in range(retries):
-                try:
-                    if hasattr(self.client, "orderstatus"):
-                        status = self.client.orderstatus(order_id=order_id)
-                    elif hasattr(self.client, "getorder"):
-                        status = self.client.getorder(order_id=order_id)
-                    else:
-                        status = None
-                except Exception:
-                    status = None
-
-                if status and isinstance(status, dict):
-                    for key in ('avg_price', 'avg_executed_price', 'avgexecprice', 'filled_price'):
-                        if key in status and status[key]:
-                            try:
-                                return float(status[key])
-                            except Exception:
-                                pass
-                time.sleep(delay)
-            
-            # Fallback to spot
-            spot = self.get_spot_price()
-            return float(spot) if spot is not None else None
-        except Exception as e:
-            print(f"Error in fetch_order_filled_price: {e}")
-            return None
-
-    def sell_straddle(self, strike):
-        """Sell fresh straddle at given strike"""
-        self.log(f"SELLING STRADDLE at strike {strike}")
+try:
+    while True:
+        now = datetime.now(pytz.timezone("Asia/Kolkata")).time()
+        entry_start = dtime(STRADDLE_ENTRY_HOUR, STRADDLE_ENTRY_MINUTE)
+        squareoff_time = dtime(SQUAREOFF_HOUR, SQUAREOFF_MINUTE)
         
-        # Sell CE
-        res_ce = self.safe_place_order(strike=strike, option_type="CE", action="SELL")
-        time.sleep(0.5)
+        # Rolling monitor runs during straddle session only
+        if entry_start < now < squareoff_time and last_reference_spot:
+            rolling_monitor()
         
-        # Sell PE
-        res_pe = self.safe_place_order(strike=strike, option_type="PE", action="SELL")
-        time.sleep(0.5)
-        
-        # Update state
-        self.current_strike = strike
-        self.ce_open = bool(res_ce["order_id"])
-        self.pe_open = bool(res_pe["order_id"])
-        self.ce_order_id = res_ce["order_id"]
-        self.pe_order_id = res_pe["order_id"]
-        self.ce_sell_price = res_ce["filled_price"]
-        self.pe_sell_price = res_pe["filled_price"]
-        
-        self.log(f"Straddle sold: CE open={self.ce_open}, PE open={self.pe_open}")
-
-    def close_straddle(self):
-        """Close both legs of current straddle"""
-        if not self.current_strike:
-            self.log("No straddle to close")
-            return
-        
-        self.log(f"CLOSING STRADDLE at strike {self.current_strike}")
-        
-        ce_pnl = None
-        pe_pnl = None
-        
-        # Close CE if open
-        if self.ce_open:
-            res_ce = self.safe_place_order(strike=self.current_strike, option_type="CE", action="BUY")
-            if res_ce["order_id"]:
-                buy_price = res_ce["filled_price"]
-                if self.ce_sell_price and buy_price:
-                    ce_pnl = (self.ce_sell_price - buy_price) * self.total_qty_per_leg
-                    self.log(f"CE closed: sell={self.ce_sell_price:.2f} buy={buy_price:.2f} pnl={ce_pnl:.2f}")
-                self.ce_open = False
-            time.sleep(0.5)
-        
-        # Close PE if open
-        if self.pe_open:
-            res_pe = self.safe_place_order(strike=self.current_strike, option_type="PE", action="BUY")
-            if res_pe["order_id"]:
-                buy_price = res_pe["filled_price"]
-                if self.pe_sell_price and buy_price:
-                    pe_pnl = (self.pe_sell_price - buy_price) * self.total_qty_per_leg
-                    self.log(f"PE closed: sell={self.pe_sell_price:.2f} buy={buy_price:.2f} pnl={pe_pnl:.2f}")
-                self.pe_open = False
-            time.sleep(0.5)
-        
-        # Log total P&L for this straddle
-        if ce_pnl is not None and pe_pnl is not None:
-            total_pnl = ce_pnl + pe_pnl
-            self.log(f"Straddle P&L: CE={ce_pnl:.2f} PE={pe_pnl:.2f} Total={total_pnl:.2f}")
-        
-        # Reset state
-        self.current_strike = None
-        self.ce_order_id = None
-        self.pe_order_id = None
-        self.ce_sell_price = None
-        self.pe_sell_price = None
-
-    def log(self, txt):
-        print(f"{datetime.now().isoformat()} | {txt}")
-
-    def initial_entry(self):
-        """Initial entry: sell straddle at ATM"""
-        spot = self.get_spot_price()
-        if spot is None:
-            self.log("Failed to fetch spot for entry")
-            return False
-        
-        atm = self.get_atm_strike(spot)
-        self.entry_spot = spot
-        self.log(f"INITIAL ENTRY: spot={spot:.2f} ATM={atm}")
-        
-        self.sell_straddle(atm)
-        return True
-
-    def check_adjustment_trigger(self, current_spot):
-        """Check if adjustment is needed"""
-        if self.entry_spot is None:
-            return False, None
-        
-        move_pct = (current_spot - self.entry_spot) / self.entry_spot
-        if abs(move_pct) >= self.adjustment_trigger:
-            return True, ("UP" if move_pct > 0 else "DOWN")
-        
-        return False, None
-
-    def execute_adjustment(self, direction, current_spot):
-        """Execute FULL ROLL: close both legs, open new straddle"""
-        if self.adjustment_count >= self.max_adjustments:
-            self.log("Max adjustments reached; skipping")
-            return False
-        
-        self.log(f"ADJUSTMENT #{self.adjustment_count+1} triggered: direction={direction}")
-        self.log("FULL ROLL: Closing BOTH legs")
-        
-        # Close entire straddle
-        self.close_straddle()
-        
-        # Open new straddle at new ATM
-        new_atm = self.get_atm_strike(current_spot)
-        self.sell_straddle(new_atm)
-        
-        # Update counters
-        self.adjustment_count += 1
-        self.entry_spot = current_spot
-        
-        self.log(f"Adjustment #{self.adjustment_count} completed. New strike={new_atm}")
-        return True
-
-    def run(self):
-        """Main strategy loop"""
-        try:
-            # Wait for entry time
-            self.log(f"Waiting for entry time {self.entry_time_str}...")
-            while True:
-                now = datetime.now()
-                cur_time = now.strftime("%H:%M")
-                
-                if cur_time == self.entry_time_str and not self.entry_spot:
-                    ok = self.initial_entry()
-                    if ok:
-                        break
-                    else:
-                        self.log("Entry failed; retrying in 30s")
-                        time.sleep(30)
-                
-                time.sleep(5)
-            
-            # Monitor loop
-            self.log("Entry completed. Starting monitor loop.")
-            while True:
-                now = datetime.now()
-                cur_time = now.strftime("%H:%M")
-                
-                # Exit time check
-                if cur_time >= self.exit_time_str:
-                    self.log("Exit time reached. Closing all positions.")
-                    self.close_straddle()
-                    self.log(f"Total adjustments: {self.adjustment_count}")
-                    break
-                
-                # Get current spot
-                spot = self.get_spot_price()
-                if spot is None:
-                    time.sleep(10)
-                    continue
-                
-                # Calculate move from entry
-                move_pct = ((spot - self.entry_spot) / self.entry_spot * 100) if self.entry_spot else 0.0
-                self.log(f"Spot: {spot:.2f} | Entry: {self.entry_spot:.2f} | Move: {move_pct:.3f}% | Adj: {self.adjustment_count}/{self.max_adjustments}")
-                
-                # Check adjustment trigger
-                trigger, direction = self.check_adjustment_trigger(spot)
-                if trigger and self.adjustment_count < self.max_adjustments:
-                    self.execute_adjustment(direction, spot)
-                    time.sleep(60)  # Wait 1 min after adjustment
-                    continue
-                
-                time.sleep(15)  # Regular monitoring interval
-            
-            self.log("Strategy run finished.")
-        
-        except KeyboardInterrupt:
-            self.log("Interrupted by user.")
-            ans = input("Close all positions? (y/n): ").strip().lower()
-            if ans == 'y':
-                self.close_straddle()
-        
-        except Exception as e:
-            print(f"Strategy error: {e}")
-            traceback.print_exc()
-
-
-if __name__ == "__main__":
-    API_KEY = os.getenv('OPENALGO_APIKEY')
-    SYMBOL = "NIFTY"
-    LOTS = 1
-    HOST = os.getenv('OPENALGO_API_HOST', 'http://127.0.0.1:5000')
-
-    strat = RollingShortStraddleFullRoll(
-        api_key=API_KEY,
-        symbol=SYMBOL,
-        lots=LOTS,
-        host=HOST,
-        entry_time_str="09:20",
-        exit_time_str="15:15",
-        max_adjustments=3,
-        adjustment_trigger=0.005  # 0.5%
-    )
-    strat.run()
+        systime.sleep(5)
+except (KeyboardInterrupt, SystemExit):
+    scheduler.shutdown()
+    print("\n👋 Bot stopped by user.")

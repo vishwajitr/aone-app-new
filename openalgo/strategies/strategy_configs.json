@@ -2,14 +2,14 @@
   "nifty_options_orb_15mins_20251214200022": {
     "name": "nifty_options_orb_15mins",
     "file_path": "strategies/scripts/nifty_options_orb_15mins_20251214200022.py",
-    "is_running": true,
+    "is_running": false,
     "is_scheduled": false,
     "created_at": "2025-12-14T20:00:22.660092+05:30",
     "user_id": "vishwajitrikame",
-    "last_started": "2025-12-16T09:53:46.818718+05:30",
-    "pid": 74287,
-    "last_stopped": "2025-12-16T09:53:39.310507+05:30",
-    "last_modified": "2025-12-16T09:53:44.805332+05:30"
+    "last_started": "2025-12-17T00:02:54.522629+05:30",
+    "pid": null,
+    "last_stopped": "2025-12-17T00:30:03.596007+05:30",
+    "last_modified": "2025-12-17T00:37:09.353384+05:30"
   },
   "rolling_straddle_20251214200127": {
     "name": "Rolling Straddle Live",
@@ -20,6 +20,7 @@
     "user_id": "vishwajitrikame",
     "last_started": "2025-12-16T09:30:28.660709+05:30",
     "pid": null,
-    "last_stopped": "2025-12-16T09:35:12.569219+05:30"
+    "last_stopped": "2025-12-16T09:35:12.569219+05:30",
+    "last_modified": "2025-12-17T00:54:53.300999+05:30"
   }
 }
