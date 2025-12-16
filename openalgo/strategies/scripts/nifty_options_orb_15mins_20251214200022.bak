@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""
+NIFTY 9:30–9:45 ORB (LIVE) – OpenAlgo
+-----------------------------------
+✔ Live ORB candle build (no history)
+✔ 9:30–9:45 breakout
+✔ Dynamic expiry handled by OpenAlgo (NO manual expiry)
+✔ Correct options order placement
+✔ Continuous spot + option logging (configurable)
+✔ APScheduler (IST only)
+✔ Safe exits
+"""
+
+print("🔁 OpenAlgo Python Bot is running.")
+
+# -------------------------------------------------------
+# Imports
+# -------------------------------------------------------
+from openalgo import api
+import time
+import os
+from datetime import datetime, time as dt_time
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
+
+# -------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------
+API_KEY = os.getenv("OPENALGO_APIKEY")
+HOST = os.getenv("OPENALGO_API_HOST", "http://127.0.0.1:5000")
+
+SPOT_SYMBOL = "NIFTY"
+SPOT_EXCHANGE = "NSE_INDEX"
+
+# IMPORTANT:
+# optionsorder -> exchange MUST be NSE_INDEX
+# option quotes -> exchange MUST be NFO
+OPTION_ORDER_EXCHANGE = "NSE_INDEX"
+OPTION_QUOTES_EXCHANGE = "NFO"
+
+LOT_SIZE = 75
+QTY = LOT_SIZE
+
+TARGET_POINTS = 30
+STOPLOSS_POINTS = 15
+BUFFER = 0.2
+
+# ORB Window (9:30–9:45)
+ORB_START = dt_time(9, 30)
+ORB_END   = dt_time(9, 45)
+
+FORCE_EXIT = dt_time(15, 10)
+
+# Logging config
+SPOT_LOG_INTERVAL_MIN = 5
+OPTION_LOG_INTERVAL_MIN = 1
+LOG_DIR = "logs"
+
+# -------------------------------------------------------
+# Setup
+# -------------------------------------------------------
+IST = pytz.timezone("Asia/Kolkata")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+client = api(api_key=API_KEY, host=HOST)
+
+scheduler = BackgroundScheduler(timezone=IST)
+scheduler.start()
+
+# -------------------------------------------------------
+# State
+# -------------------------------------------------------
+first_high = None
+first_low = None
+orb_locked = False
+
+entry_symbol = None
+entry_price = None
+stop_price = None
+target_price = None
+trade_done = False
+
+# -------------------------------------------------------
+# Utils
+# -------------------------------------------------------
+
+def log(msg):
+    print(f"{datetime.now(IST).strftime('%H:%M:%S')} | {msg}")
+
+
+def log_to_file(filename, msg):
+    ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    with open(os.path.join(LOG_DIR, filename), "a") as f:
+        f.write(f"{ts},{msg}\n")
+
+
+def get_spot():
+    r = client.quotes(symbol=SPOT_SYMBOL, exchange=SPOT_EXCHANGE)
+    return float(r["data"]["ltp"])
+
+# -------------------------------------------------------
+# Logging Jobs
+# -------------------------------------------------------
+
+def spot_logger_job():
+    try:
+        spot = get_spot()
+        log_to_file("spot_log.csv", f"NIFTY,{spot}")
+        print(f"📌 SPOT LOG | NIFTY={spot}")
+    except Exception as e:
+        log(f"SPOT LOG ERROR: {e}")
+
+
+def option_logger_job():
+    if not entry_symbol:
+        return
+    r = client.quotes(symbol=entry_symbol, exchange=OPTION_QUOTES_EXCHANGE)
+    ltp = r["data"]["ltp"]
+    pnl = (ltp - entry_price) * QTY
+    log_to_file(
+        "option_log.csv",
+        f"{entry_symbol},{ltp},{entry_price},{stop_price},{target_price},{pnl}"
+    )
+    print(f"🎯 OPT LOG | {entry_symbol} LTP={ltp} PNL={pnl:.2f}")
+
+# Start spot logger immediately
+scheduler.add_job(
+    spot_logger_job,
+    "interval",
+    minutes=SPOT_LOG_INTERVAL_MIN,
+    id="spot_logger",
+    replace_existing=True
+)
+
+# -------------------------------------------------------
+# Orders
+# -------------------------------------------------------
+
+def buy_option(option_type):
+    """
+    NOTE:
+    - expiry_date is intentionally NOT passed
+    - OpenAlgo auto-resolves correct weekly expiry
+    - Handles holidays (e.g., Wed expiry if Thu holiday)
+    """
+    resp = client.optionsorder(
+        strategy="ORB_0930_0945",
+        underlying="NIFTY",
+        exchange=OPTION_ORDER_EXCHANGE,
+        offset="ATM",
+        option_type=option_type,
+        action="BUY",
+        quantity=QTY,
+        pricetype="MARKET",
+        product="NRML"
+    )
+
+    log(f"ORDER RESPONSE: {resp}")
+
+    if resp.get("status") != "success":
+        return None
+
+    return resp.get("symbol")
+
+
+def sell_option(symbol):
+    client.placeorder(
+        strategy="ORB_0930_0945_EXIT",
+        symbol=symbol,
+        exchange=OPTION_QUOTES_EXCHANGE,
+        action="SELL",
+        price_type="MARKET",
+        product="NRML",
+        quantity=QTY
+    )
+
+# -------------------------------------------------------
+# Main Loop
+# -------------------------------------------------------
+log("Waiting for market...")
+
+while True:
+    now = datetime.now(IST).time()
+
+    # Wait until ORB start
+    if now < ORB_START:
+        time.sleep(1)
+        continue
+
+    # Force exit
+    if now >= FORCE_EXIT:
+        if entry_symbol:
+            log("FORCED EXIT")
+            sell_option(entry_symbol)
+        break
+
+    try:
+        spot = get_spot()
+    except Exception:
+        time.sleep(1)
+        continue
+
+    # ---------------------------------------------------
+    # Build ORB candle (9:30–9:45)
+    # ---------------------------------------------------
+    if ORB_START <= now <= ORB_END:
+        if first_high is None:
+            first_high = spot
+            first_low = spot
+            log(f"ORB START | Spot={spot}")
+        else:
+            first_high = max(first_high, spot)
+            first_low = min(first_low, spot)
+
+    # Lock ORB
+    if now > ORB_END and not orb_locked and first_high:
+        orb_locked = True
+        log(f"ORB LOCKED | HIGH={first_high} LOW={first_low}")
+
+    # ---------------------------------------------------
+    # Entry
+    # ---------------------------------------------------
+    if orb_locked and not entry_symbol and not trade_done:
+        if spot >= first_high + BUFFER:
+            entry_symbol = buy_option("CE")
+        elif spot <= first_low - BUFFER:
+            entry_symbol = buy_option("PE")
+
+        if entry_symbol:
+            r = client.quotes(symbol=entry_symbol, exchange=OPTION_QUOTES_EXCHANGE)
+            entry_price = r["data"]["ltp"]
+            stop_price = entry_price - STOPLOSS_POINTS
+            target_price = entry_price + TARGET_POINTS
+
+            log(
+                f"ENTRY {entry_symbol} @ {entry_price} "
+                f"SL={stop_price} TG={target_price}"
+            )
+
+            scheduler.add_job(
+                option_logger_job,
+                "interval",
+                minutes=OPTION_LOG_INTERVAL_MIN,
+                id="option_logger",
+                replace_existing=True
+            )
+
+    # ---------------------------------------------------
+    # Exit
+    # ---------------------------------------------------
+    if entry_symbol:
+        r = client.quotes(symbol=entry_symbol, exchange=OPTION_QUOTES_EXCHANGE)
+        ltp = r["data"]["ltp"]
+
+        if ltp <= stop_price:
+            log("STOPLOSS HIT")
+            sell_option(entry_symbol)
+            trade_done = True
+            break
+
+        if ltp >= target_price:
+            log("TARGET HIT")
+            sell_option(entry_symbol)
+            trade_done = True
+            break
+
+    time.sleep(1)
+
+scheduler.shutdown()
+log("STRATEGY FINISHED")
