@@ -1,6 +1,6 @@
 venopenalgo
 .venv/
-.env
+# .env
 openalgo.db
 *.db-shm
 *.db-wal
