@@ -49,12 +49,12 @@ OPTION_QUOTES_EXCHANGE = "NFO"  # Correct exchange for quotes
 LOT_SIZE = 75
 QTY = LOT_SIZE
 
-TARGET_POINTS = 30
-STOPLOSS_POINTS = 15
+TARGET_POINTS = 7
+STOPLOSS_POINTS = 7
 BUFFER = 0.2
 
-ORB_START = dt_time(9, 3)   # ORB build starts at 9:15 AM
-ORB_END   = dt_time(9, 4)   # ORB locks at 9:30 AM
+ORB_START = dt_time(10, 23)   # ORB build starts at 9:15 AM
+ORB_END   = dt_time(10, 24)   # ORB locks at 9:30 AM
 
 FORCE_EXIT = dt_time(15, 10)
 
