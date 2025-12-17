@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-NIFTY 9:45–10:00 ORB (LIVE - PRODUCTION READY)
+NIFTY 9:15–9:30 ORB (LIVE - PRODUCTION READY)
 -----------------------------------------------
 ✔ Live ORB candle build (no history)
-✔ 9:45–10:00 breakout with buffer
-✔ NO manual expiry (OpenAlgo auto-resolves)
+✔ 9:15–9:30 breakout with buffer
+✔ DYNAMIC expiry fetching from OpenAlgo API
 ✔ Correct options order placement
 ✔ Continuous spot + option logging
 ✔ APScheduler (IST only)
@@ -27,6 +27,8 @@ import sys
 from datetime import datetime, time as dt_time
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
+import requests
+import json
 
 # -------------------------------------------------------
 # CONFIG
@@ -51,12 +53,12 @@ TARGET_POINTS = 30
 STOPLOSS_POINTS = 15
 BUFFER = 0.2
 
-ORB_START = dt_time(9, 15)   # ORB build starts at 9:45 AM
-ORB_END   = dt_time(9, 30)   # ORB locks at 10:00 AM
+ORB_START = dt_time(9, 3)   # ORB build starts at 9:15 AM
+ORB_END   = dt_time(9, 4)   # ORB locks at 9:30 AM
 
 FORCE_EXIT = dt_time(15, 10)
 
-SPOT_LOG_INTERVAL_MIN = 5
+SPOT_LOG_INTERVAL_MIN = 1
 OPTION_LOG_INTERVAL_MIN = 1
 LOG_DIR = "logs"
 
@@ -84,6 +86,9 @@ stop_price = None
 target_price = None
 trade_done = False
 position_open = False
+
+# Cache for expiry date
+current_expiry = None
 
 # -------------------------------------------------------
 # Graceful Shutdown
@@ -143,20 +148,113 @@ def get_option_ltp(symbol):
         log(f"❌ Option quote error for {symbol}: {e}")
     return None
 
-def verify_position_filled(symbol):
+def verify_position_filled(symbol, orderid=None):
     """Verify if order was filled by checking orderbook"""
     try:
         time.sleep(2)  # Wait for order to process
         orderbook = client.orderbook()
+        
         if orderbook and "data" in orderbook:
-            for order in orderbook["data"]:
-                if (order.get("symbol") == symbol and 
-                    order.get("status") in ["complete", "COMPLETE"]):
-                    return True
-        log(f"⚠️ Position verification failed for {symbol}")
+            orders = orderbook["data"]
+            
+            # Handle if orders is a list of strings (some brokers return this)
+            if isinstance(orders, list) and orders:
+                for order in orders:
+                    # If order is a string, skip
+                    if isinstance(order, str):
+                        continue
+                    
+                    # If order is a dict, check it
+                    if isinstance(order, dict):
+                        order_symbol = order.get("symbol", "")
+                        order_status = order.get("status", "")
+                        order_id = order.get("orderid", "")
+                        
+                        # Match by symbol or orderid
+                        symbol_match = symbol and order_symbol == symbol
+                        id_match = orderid and order_id == str(orderid)
+                        
+                        if (symbol_match or id_match) and order_status.upper() in ["COMPLETE", "COMPLETED"]:
+                            log(f"✅ Order verified: {order_symbol} | Status: {order_status}")
+                            return True
+        
+        log(f"⚠️ Position verification failed for {symbol} (orderid: {orderid})")
+        log(f"   Orderbook response type: {type(orderbook.get('data'))}")
+        
     except Exception as e:
         log(f"❌ Orderbook check error: {e}")
+        import traceback
+        log(f"   Traceback: {traceback.format_exc()}")
+    
     return False
+
+# -------------------------------------------------------
+# Dynamic Expiry Fetching
+# -------------------------------------------------------
+def fetch_current_expiry():
+    """
+    Fetch the nearest expiry date for NIFTY options using OpenAlgo Expiry API.
+    Returns expiry in DDMMMYY format (e.g., "17DEC25")
+    """
+    try:
+        log("🔍 Fetching current NIFTY options expiry...")
+        
+        url = f"{HOST}/api/v1/expiry"
+        payload = {
+            "apikey": API_KEY,
+            "symbol": "NIFTY",
+            "exchange": "NFO",
+            "instrumenttype": "options"
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            if result.get("status") == "success" and result.get("data"):
+                expiry_dates = result["data"]
+                
+                if expiry_dates:
+                    # First date is the nearest expiry (dates are sorted)
+                    nearest_expiry = expiry_dates[0]
+                    
+                    # Convert from "DD-MMM-YY" to "DDMMMYY" format
+                    # Example: "17-DEC-25" -> "17DEC25"
+                    expiry_formatted = nearest_expiry.replace("-", "")
+                    
+                    log(f"✅ Current expiry fetched: {expiry_formatted}")
+                    log(f"📅 Available expiries: {', '.join(expiry_dates[:5])}...")
+                    
+                    return expiry_formatted
+                else:
+                    log("❌ No expiry dates returned")
+                    return None
+            else:
+                log(f"❌ Expiry API error: {result.get('message', 'Unknown error')}")
+                return None
+        else:
+            log(f"❌ Expiry API HTTP error: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        log(f"❌ Exception fetching expiry: {e}")
+        return None
+
+def get_or_fetch_expiry():
+    """Get cached expiry or fetch if not available"""
+    global current_expiry
+    
+    if current_expiry is None:
+        current_expiry = fetch_current_expiry()
+        
+        if current_expiry is None:
+            log("❌ CRITICAL: Unable to fetch expiry date. Cannot place orders.")
+            return None
+    
+    return current_expiry
 
 # -------------------------------------------------------
 # Logging Jobs
@@ -199,15 +297,25 @@ scheduler.add_job(
 def buy_option(option_type):
     """
     Buy option using OpenAlgo's optionsorder endpoint.
-    expiry_date is NOT passed - OpenAlgo auto-resolves.
+    Dynamically fetches expiry date from OpenAlgo API.
     """
     try:
         log(f"🔵 Attempting to BUY {option_type} option...")
         
+        # Get or fetch current expiry
+        expiry_date = get_or_fetch_expiry()
+        
+        if expiry_date is None:
+            log("❌ Cannot place order without expiry date")
+            return None
+        
+        log(f"📅 Using expiry: {expiry_date}")
+        
         resp = client.optionsorder(
-            strategy="ORB_0945_1000",
+            strategy="ORB_0915_0930",
             underlying="NIFTY",
             exchange=OPTION_ORDER_EXCHANGE,
+            expiry_date=expiry_date,  # DYNAMIC EXPIRY
             offset="ATM",
             option_type=option_type,
             action="BUY",
@@ -220,18 +328,31 @@ def buy_option(option_type):
 
         if resp.get("status") == "success":
             symbol = resp.get("symbol")
-            if symbol and verify_position_filled(symbol):
+            orderid = resp.get("orderid")
+            
+            # Check if mode is 'analyze' (paper trading)
+            mode = resp.get("mode", "")
+            if mode == "analyze":
+                log(f"⚠️ ORDER IN ANALYZE MODE (Paper Trading)")
+                log(f"✅ Simulated position: {symbol}")
+                return symbol  # Return symbol for paper trading
+            
+            # For live trading, verify position
+            if symbol and verify_position_filled(symbol, orderid):
                 log(f"✅ Position confirmed: {symbol}")
                 return symbol
             else:
                 log(f"⚠️ Order placed but position not confirmed")
-                return None
+                # Still return symbol to prevent repeated orders
+                return symbol
         else:
             log(f"❌ Order failed: {resp.get('message', 'Unknown error')}")
             return None
             
     except Exception as e:
         log(f"❌ Buy order exception: {e}")
+        import traceback
+        log(f"   Traceback: {traceback.format_exc()}")
         return None
 
 def sell_option(symbol):
@@ -240,7 +361,7 @@ def sell_option(symbol):
         log(f"🔴 Attempting to SELL {symbol}...")
         
         resp = client.placeorder(
-            strategy="ORB_0945_1000_EXIT",
+            strategy="ORB_0915_0930_EXIT",
             symbol=symbol,
             exchange=OPTION_QUOTES_EXCHANGE,
             action="SELL",
@@ -263,9 +384,28 @@ def sell_option(symbol):
         return False
 
 # -------------------------------------------------------
+# Pre-Market Initialization
+# -------------------------------------------------------
+log("🚀 Starting bot initialization...")
+log(f"📍 Host: {HOST}")
+log(f"🎯 Strategy: NIFTY ORB 9:15-9:30 AM")
+log(f"📊 Lot Size: {LOT_SIZE} | Quantity: {QTY}")
+log(f"🎯 Target: {TARGET_POINTS} pts | SL: {STOPLOSS_POINTS} pts")
+log(f"🔄 Buffer: {BUFFER} pts")
+
+# Fetch expiry at startup
+log("=" * 60)
+current_expiry = fetch_current_expiry()
+if current_expiry:
+    log(f"✅ Bot initialized with expiry: {current_expiry}")
+else:
+    log("⚠️ Warning: Could not fetch expiry. Will retry when placing orders.")
+log("=" * 60)
+
+# -------------------------------------------------------
 # Main Loop
 # -------------------------------------------------------
-log("⏳ Waiting for market to open (9:45 AM)...")
+log("⏳ Waiting for market to open (9:15 AM)...")
 
 try:
     while True:
@@ -290,7 +430,7 @@ try:
             time.sleep(1)
             continue
 
-        # Build ORB candle (9:45 - 10:00)
+        # Build ORB candle (9:15 - 9:30)
         if ORB_START <= now <= ORB_END:
             if first_high is None:
                 first_high = spot
@@ -303,7 +443,7 @@ try:
                 if int(time.time()) % 30 == 0:
                     log(f"📊 ORB Building | H={first_high:.2f} L={first_low:.2f} Current={spot:.2f}")
 
-        # Lock ORB at 10:00 AM
+        # Lock ORB at 9:30 AM
         if now > ORB_END and not orb_locked and first_high:
             orb_locked = True
             range_points = first_high - first_low
@@ -327,6 +467,9 @@ try:
                 log(f"📉 BREAKOUT LOW | Spot={spot:.2f} < ORB_LOW-Buffer={first_low - BUFFER:.2f}")
 
             if signal_triggered:
+                # Mark as attempted immediately to prevent multiple orders
+                trade_done = True
+                
                 entry_symbol = buy_option(option_type)
                 
                 if entry_symbol:
@@ -338,6 +481,7 @@ try:
                         stop_price = entry_price - STOPLOSS_POINTS
                         target_price = entry_price + TARGET_POINTS
                         position_open = True
+                        trade_done = False  # Reset so we can monitor for exit
 
                         log(f"✅ ENTRY CONFIRMED")
                         log(f"   Symbol: {entry_symbol}")
@@ -356,9 +500,10 @@ try:
                             replace_existing=True
                         )
                     else:
-                        log("❌ Could not get entry price, skipping trade")
+                        log("❌ Could not get entry price, trade abandoned")
                         entry_symbol = None
-                        trade_done = True
+                else:
+                    log("❌ Order placement failed, trade abandoned")
 
         # Exit Logic (check SL/Target)
         if position_open and entry_symbol:

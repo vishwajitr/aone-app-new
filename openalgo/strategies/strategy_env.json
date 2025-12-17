@@ -16,5 +16,8 @@
   },
   "rolling_straddle_20251214200127": {
     "OPENALGO_APIKEY": "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c"
+  },
+  "nifty_options_orb_15mins_20251214200022": {
+    "OPENALGO_APIKEY": "52d589a0ae86e68f22ef820cd20272c33e579eb62cf30db18bc297b7c8b11e3c"
   }
 }
