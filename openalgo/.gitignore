@@ -5,7 +5,7 @@ openalgo.db
 *.db-shm
 *.db-wal
 *.db-journal
-.env
+# .env
 .flaskenv
 *.pyc
 __pycache__/
@@ -37,7 +37,7 @@ db/strategy_encryption.key
 !all_symbols.csv
 
 # Environments 
-.env 
+# .env 
 .venv 
 env/ 
 venv/ 
