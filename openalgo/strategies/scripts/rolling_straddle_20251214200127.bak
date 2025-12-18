@@ -13,7 +13,7 @@ print("🔁 OpenAlgo Python Bot with Hedges is running.")
 # === USER PARAMETERS ===
 
 STRADDLE_ENTRY_HOUR = 11       # 10 for 10:40 AM
-STRADDLE_ENTRY_MINUTE = 20    # 40 for 10:40 AM
+STRADDLE_ENTRY_MINUTE = 23    # 40 for 10:40 AM
 
 SQUAREOFF_HOUR = 15           # 15 for 3:20 PM
 SQUAREOFF_MINUTE = 20         # 20 for 3:20 PM

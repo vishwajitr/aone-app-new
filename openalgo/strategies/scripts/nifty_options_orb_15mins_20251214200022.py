@@ -53,8 +53,8 @@ TARGET_POINTS = 15
 STOPLOSS_POINTS = 3
 BUFFER = 0.2
 
-ORB_START = dt_time(10, 33)   # ORB build starts at 9:15 AM
-ORB_END   = dt_time(10, 34)   # ORB locks at 9:30 AM
+ORB_START = dt_time(9, 15)   # ORB build starts at 9:15 AM
+ORB_END   = dt_time(9, 30)   # ORB locks at 9:30 AM
 
 FORCE_EXIT = dt_time(15, 10)
 

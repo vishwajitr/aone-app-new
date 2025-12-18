@@ -12,6 +12,7 @@ NIFTY 9:15–9:30 ORB (LIVE - PRODUCTION READY)
 ✔ Improved error handling & logging
 ✔ Position tracking with orderbook verification
 ✔ Graceful shutdown handling
+✔ DUPLICATE ORDER PREVENTION (BUY & SELL)
 """
 
 print("🔁 OpenAlgo Python Bot is running.")
@@ -29,6 +30,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import requests
 import json
+import threading
 
 # -------------------------------------------------------
 # CONFIG
@@ -49,12 +51,12 @@ OPTION_QUOTES_EXCHANGE = "NFO"  # Correct exchange for quotes
 LOT_SIZE = 75
 QTY = LOT_SIZE
 
-TARGET_POINTS = 15
-STOPLOSS_POINTS = 3
+TARGET_POINTS = 30
+STOPLOSS_POINTS = 5
 BUFFER = 0.2
 
-ORB_START = dt_time(10, 33)   # ORB build starts at 9:15 AM
-ORB_END   = dt_time(10, 34)   # ORB locks at 9:30 AM
+ORB_START = dt_time(9, 15)   # ORB build starts at 9:15 AM
+ORB_END   = dt_time(9, 30)   # ORB locks at 9:30 AM
 
 FORCE_EXIT = dt_time(15, 10)
 
@@ -74,7 +76,7 @@ scheduler = BackgroundScheduler(timezone=IST)
 scheduler.start()
 
 # -------------------------------------------------------
-# State
+# State with Thread Safety
 # -------------------------------------------------------
 first_high = None
 first_low = None
@@ -90,12 +92,20 @@ position_open = False
 # Cache for expiry date
 current_expiry = None
 
+# Thread locks to prevent race conditions
+order_lock = threading.Lock()
+exit_lock = threading.Lock()
+
+# Track order attempts
+buy_order_placed = False
+sell_order_placed = False
+
 # -------------------------------------------------------
 # Graceful Shutdown
 # -------------------------------------------------------
 def signal_handler(sig, frame):
     log("⚠️ SHUTDOWN SIGNAL RECEIVED")
-    if position_open and entry_symbol:
+    if position_open and entry_symbol and not sell_order_placed:
         log("⚠️ Attempting to close open position...")
         try:
             sell_option(entry_symbol)
@@ -179,12 +189,9 @@ def verify_position_filled(symbol, orderid=None):
                             return True
         
         log(f"⚠️ Position verification failed for {symbol} (orderid: {orderid})")
-        log(f"   Orderbook response type: {type(orderbook.get('data'))}")
         
     except Exception as e:
         log(f"❌ Orderbook check error: {e}")
-        import traceback
-        log(f"   Traceback: {traceback.format_exc()}")
     
     return False
 
@@ -292,13 +299,24 @@ scheduler.add_job(
 )
 
 # -------------------------------------------------------
-# Orders
+# Orders with Duplicate Prevention
 # -------------------------------------------------------
 def buy_option(option_type):
     """
     Buy option using OpenAlgo's optionsorder endpoint.
     Dynamically fetches expiry date from OpenAlgo API.
+    Thread-safe to prevent duplicate orders.
     """
+    global buy_order_placed
+    
+    # Thread-safe check to prevent duplicate buy orders
+    with order_lock:
+        if buy_order_placed:
+            log("⚠️ BUY order already placed, skipping duplicate")
+            return None
+        
+        buy_order_placed = True  # Mark immediately to block other threads
+    
     try:
         log(f"🔵 Attempting to BUY {option_type} option...")
         
@@ -307,6 +325,7 @@ def buy_option(option_type):
         
         if expiry_date is None:
             log("❌ Cannot place order without expiry date")
+            buy_order_placed = False  # Reset on failure
             return None
         
         log(f"📅 Using expiry: {expiry_date}")
@@ -338,25 +357,40 @@ def buy_option(option_type):
                 return symbol  # Return symbol for paper trading
             
             # For live trading, verify position
-            if symbol and verify_position_filled(symbol, orderid):
-                log(f"✅ Position confirmed: {symbol}")
+            if symbol:
+                log(f"✅ Buy order placed: {symbol} (OrderID: {orderid})")
                 return symbol
             else:
-                log(f"⚠️ Order placed but position not confirmed")
-                # Still return symbol to prevent repeated orders
-                return symbol
+                log(f"⚠️ Order response missing symbol")
+                buy_order_placed = False  # Reset on failure
+                return None
         else:
             log(f"❌ Order failed: {resp.get('message', 'Unknown error')}")
+            buy_order_placed = False  # Reset on failure
             return None
             
     except Exception as e:
         log(f"❌ Buy order exception: {e}")
         import traceback
         log(f"   Traceback: {traceback.format_exc()}")
+        buy_order_placed = False  # Reset on exception
         return None
 
 def sell_option(symbol):
-    """Exit option position"""
+    """
+    Exit option position.
+    Thread-safe to prevent duplicate sell orders.
+    """
+    global sell_order_placed, position_open
+    
+    # Thread-safe check to prevent duplicate sell orders
+    with exit_lock:
+        if sell_order_placed:
+            log("⚠️ SELL order already placed, skipping duplicate")
+            return False
+        
+        sell_order_placed = True  # Mark immediately to block other threads
+    
     try:
         log(f"🔴 Attempting to SELL {symbol}...")
         
@@ -374,13 +408,16 @@ def sell_option(symbol):
         
         if resp.get("status") == "success":
             log(f"✅ Exit order successful")
+            position_open = False  # Mark position as closed
             return True
         else:
             log(f"❌ Exit failed: {resp.get('message', 'Unknown error')}")
+            sell_order_placed = False  # Reset on failure
             return False
             
     except Exception as e:
         log(f"❌ Sell order exception: {e}")
+        sell_order_placed = False  # Reset on exception
         return False
 
 # -------------------------------------------------------
@@ -418,10 +455,9 @@ try:
 
         # Force exit at 3:10 PM
         if now >= FORCE_EXIT:
-            if position_open and entry_symbol:
+            if position_open and entry_symbol and not sell_order_placed:
                 log("⏰ FORCED EXIT - Market closing")
-                if sell_option(entry_symbol):
-                    position_open = False
+                sell_option(entry_symbol)
             break
 
         # Get current spot price
@@ -450,7 +486,7 @@ try:
             log(f"🔒 ORB LOCKED | HIGH={first_high:.2f} LOW={first_low:.2f} RANGE={range_points:.2f}")
 
         # Entry Logic (after ORB locked)
-        if orb_locked and not entry_symbol and not trade_done:
+        if orb_locked and not entry_symbol and not trade_done and not buy_order_placed:
             signal_triggered = False
             option_type = None
             
@@ -474,7 +510,7 @@ try:
                 
                 if entry_symbol:
                     # Wait a moment and get entry price
-                    time.sleep(1)
+                    time.sleep(2)
                     entry_price = get_option_ltp(entry_symbol)
                     
                     if entry_price:
@@ -502,11 +538,12 @@ try:
                     else:
                         log("❌ Could not get entry price, trade abandoned")
                         entry_symbol = None
+                        buy_order_placed = False  # Reset to allow retry
                 else:
                     log("❌ Order placement failed, trade abandoned")
 
         # Exit Logic (check SL/Target)
-        if position_open and entry_symbol:
+        if position_open and entry_symbol and not sell_order_placed:
             ltp = get_option_ltp(entry_symbol)
             
             if ltp is None:
@@ -520,7 +557,6 @@ try:
                 log(f"🛑 STOPLOSS HIT | LTP=₹{ltp:.2f} <= SL=₹{stop_price:.2f}")
                 log(f"   P&L: ₹{pnl:.2f}")
                 if sell_option(entry_symbol):
-                    position_open = False
                     trade_done = True
                     break
 
@@ -529,7 +565,6 @@ try:
                 log(f"🎯 TARGET HIT | LTP=₹{ltp:.2f} >= TG=₹{target_price:.2f}")
                 log(f"   P&L: ₹{pnl:.2f}")
                 if sell_option(entry_symbol):
-                    position_open = False
                     trade_done = True
                     break
 
@@ -537,7 +572,9 @@ try:
 
 except Exception as e:
     log(f"❌ CRITICAL ERROR: {e}")
-    if position_open and entry_symbol:
+    import traceback
+    log(f"   Traceback: {traceback.format_exc()}")
+    if position_open and entry_symbol and not sell_order_placed:
         log("⚠️ Attempting emergency exit...")
         sell_option(entry_symbol)
 

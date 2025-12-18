@@ -6,21 +6,21 @@
     "is_scheduled": false,
     "created_at": "2025-12-14T20:00:22.660092+05:30",
     "user_id": "vishwajitrikame",
-    "last_started": "2025-12-17T10:30:17.962723+05:30",
+    "last_started": "2025-12-18T09:24:09.017816+05:30",
     "pid": null,
     "last_stopped": "2025-12-17T10:21:00.407279+05:30",
-    "last_modified": "2025-12-17T10:30:16.156224+05:30"
+    "last_modified": "2025-12-18T09:22:02.289277+05:30"
   },
   "rolling_straddle_20251214200127": {
     "name": "Rolling Straddle Live",
     "file_path": "strategies/scripts/rolling_straddle_20251214200127.py",
-    "is_running": true,
+    "is_running": false,
     "is_scheduled": false,
     "created_at": "2025-12-14T20:01:27.855247+05:30",
     "user_id": "vishwajitrikame",
-    "last_started": "2025-12-17T11:21:00.192090+05:30",
-    "pid": 15885,
-    "last_stopped": "2025-12-17T11:20:26.351124+05:30",
-    "last_modified": "2025-12-17T11:20:58.253665+05:30"
+    "last_started": "2025-12-18T09:34:10.674538+05:30",
+    "pid": null,
+    "last_stopped": "2025-12-18T10:23:54.111654+05:30",
+    "last_modified": "2025-12-18T09:33:29.649491+05:30"
   }
 }
